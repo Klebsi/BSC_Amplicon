@@ -1,0 +1,112 @@
+# Script 1 - PreSwarm.sh
+#!/bin/bash
+# Run the script Ampliconize.sh for all samples
+# Rename mock community (MC) to S43
+for amp in $(seq 43); do
+Ampliconize.sh -f "S"$amp"_F.fastq" -r "S"$amp"_R.fastq" -p "A"$amp;
+done
+# Combine all fasta files to one fasta file prior to clustering
+for amp in $(seq 43); do
+cat "./Output_A"$amp"_"*/vsearch_derep.fasta" >> Allderep.fasta;
+done
+vsearch --derep_fulllength Allderep.fasta --sizein --sizeout --fasta_width 0 --output FinAllderep.fasta
+----------------------------------------------
+# Script 2  - Ampliconize.sh
+#!/bin/bash
+# Read in files and set project name 
+while getopts ':f:r:p:' OPTION; do
+	case "$OPTION" in
+		f) FWD="$OPTARG";;
+		r) REV="$OPTARG";;
+		p) PRJ="$OPTARG";;
+		*) echo "Parameter not applicable."
+	esac
+done
+# Prepare environment
+DIR="Output_"$PRJ"_$(date +%x)"
+mkdir ./$DIR
+LOG="logfile_$(date +%x).txt"
+echo -e "Command run by $USER, on" $(date +"%x %r %Z") "\n\nInput was:\n\n$FWD, $REV\n\nInput Path was:\n\n"$(pwd) >> ./$DIR/$(echo $LOG)
+# Quality check
+echo -e "\n\n----------Vsearch Qual----------\n\n" >> ./$DIR/$(echo $LOG)
+vsearch --fastq_chars $FWD 2>> ./$DIR/$(echo $LOG)
+vsearch --fastq_chars $REV 2>> ./$DIR/$(echo $LOG)
+# Stich forward and reverse read together using PEAR
+echo -e "\n\n----------PEAR----------\n\n" >> ./$DIR/$(echo $LOG)
+/home/alle/bin/PEAR/bin/pear -f $FWD -r $REV -o ./$DIR/pear -v 100 |& tee -a ./$DIR/$(echo $LOG)
+# Remove primers
+FWD_Primer="CCAGCASCYGCGGTAATTCC"
+REV_Primer="TYRATCAAGAACGAAAGT"
+MIN_F=$(( ${#FWD_Primer} * 2 / 3 ))  # Primer match is >= 2/3 of primer length
+MIN_R=$(( ${#REV_Primer} * 2 / 3 ))
+vsearch --quiet --fastx_revcomp pear.assembled.fastq --fastqout pear.assembled.revcom.fastq
+cat pear.assembled.fastq pear.assembled.revcom.fastq | ~/.local/bin/cutadapt --discard-untrimmed --minimum-length 32 -g $FWD_Primer -O "${MIN_F}" - 2>> $LOG | ~/.local/bin/cutadapt --discard-untrimmed --minimum-length 32 -a $REV_Primer -O "${MIN_R}" - 2>> $LOG > prirem.fastq
+cd ./$DIR
+rm pear.discarded.fastq
+# Remove Ns and add error rates
+echo -e "\n\n----------Vsearch N Removal----------\n\n" >> $LOG
+vsearch --quiet --fastq_filter prirem.fastq --fastq_maxns 0 --relabel_sha1 --eeout --fastqout vsearch_rem1.fastq 2>> $LOG
+#C Convert to fasta
+echo -e "\n\n----------Vsearch fastq -> fasta----------\n\n" >> $LOG
+vsearch --quiet --fastq_filter prirem.fastq --fastq_maxns 0 --fastaout vsearch_rem2.fasta 2>> $LOG
+# Dereplicate
+echo -e "\n\n----------Vsearch Derep----------\n\n" >> $LOG
+vsearch --quiet --derep_fulllength vsearch_rem2.fasta --sizeout --fasta_width 0 --relabel_sha1 --output vsearch_derep.fasta 2>> $LOG
+# Discard quality lines, extract hash, expected error rates and read length
+sed 'n;n;N;d' vsearch_rem1.fastq | awk 'BEGIN {FS = "[;=]"} {if (/^@/) {printf "%s\t%s\t", $1, $3} else {print length($1)}}' | tr -d "@" >> Qualfiletmp.txt
+sort -k3,3n -k1,1d -k2,2n Qualfiletmp.txt | uniq --check-chars=40 > Qualfile.txt
+cd ..
+----------------------------------------------
+# Script 3 - Swarming.sh
+#!/bin/bash
+# Cluster sequences
+swarm -d 1 -f -t 6 -z -i FinFasta.struct -s FinFasta.stats -w rep.fasta -o FinFasta.swarms < FinAllderep.fasta
+# Sort clusters/OTUs
+vsearch --fasta_width 0 --sortbysize rep.fasta --output finalrep.fasta
+# Identify chimeras
+vsearch --uchime_denovo finalrep.fasta --uchimeout chim.uchime
+----------------------------------------------
+# Script 4 - TaxAnno.sh
+#!/bin/bash
+# Prepare database for BLAST
+wget -c "https://www.arb-silva.de/fileadmin/silva_databases/release_128/Exports/SILVA_128_SSURef_tax_silva.fasta.gz"
+gunzip SILVA_128_SSURef_tax_silva.fasta.gz
+makeblastdb -in SILVA_128_SSURef_tax_silva.fasta - parse_seqids -dbtype nucl
+# Assign taxonomy (That can take a while)
+blastn –query finalrep.fasta –db SILVA_128_SSURef_tax_silva.fasta -outfmt 6 -out blast_rep.out -evalue 0.0000000001 -max_target_seqs 1 -num_threads 8
+# Prepare annotation table for OTU table merging
+awk '/>/{print $0;}' finalrep.fasta >> seq_size.txt
+awk '/>/{print $0;}' SILVA_128_SSURef_tax_silva.fasta >> SILVA_128_taxa.txt
+# Feed into R_Script TaxAnno.R (Script 1)
+----------------------------------------------
+# Script 5 - BuildOTUTable.sh
+#!/bin/bash
+# generate concatenated quality files and rename fasta files
+for amp in $(seq 43); do cat "Output_A"$amp"_"*/Qualfiletmp.txt" >> AllQual.txt; done
+for amp in $(seq 43); do cat "Output_A"$amp"_"*/vsearch_derep.fasta" > "S"$amp".fasta"; done
+# generate OTU table
+python OTU_contigency_table.py finalrep.fasta FinFasta.stats FinFasta.swarms chim.uchime FinQual.txt representatives.results S[0-9]*.fasta > OTU.table
+# remove sequence information from OTU table to reduce size
+cut -f10 --complement OTU.table >> OTU2.txt
+cut -f4 --complement OTU2.txt >> OTU3.txt
+rm OTU2.txt
+mv OTU3.txt OTU2.txt
+# Feed into R_Script DownstreamAna.R (Script 2)
+----------------------------------------------
+# Script 6 - FuncPred.sh
+#!/bin/bash
+# Reformat OTU table + annotate OTUs against GreenGenes
+cut -f-9,11- OTU.table >> Crust1.table
+sed -e '/;size=1;/,+1d' finalrep.fasta > Singlesremoved.fasta
+wget 'ftp://greengenes.microbio.me/greengenes_release/gg_13_5/gg_13_5.fasta.gz'
+makeblastdb -in gg_13_5.fasta -parse_seqids -dbtype nucl
+blastn -db /media/alle/Daten2/Databases/GreenGenes/gg_13_5.fasta -query Singlesremoved.fasta -out Singlesremoved.out -evalue 0.0000000001 -max_target_seqs 1 -num_threads 8
+# Feed into R_Script DownstreamAna.R (Script 2)
+biom convert -i Crust2.txt -o Crust.json.biom --table-type="OTU table" --to-json
+normalize_by_copy_number.py --gg_version 13_5 -i Crust.json.biom -o norm_otus.biom
+# Predict functions
+predict_metagenomes.py -i norm_otus.biom -o kegg_metagenome_predictions.biom
+categorize_by_function.py -f -i kegg_metagenome_predictions.biom -c KEGG_Pathways -l 1 -o kegg_functions.L1.txt
+categorize_by_function.py -f -i kegg_metagenome_predictions.biom -c KEGG_Pathways -l 2 -o kegg_functions.L2.txt
+categorize_by_function.py -f -i kegg_metagenome_predictions.biom -c KEGG_Pathways -l 3 -o kegg_functions.L3.txt
+# Feed into R_Script DownstreamAna.R (Script 2)

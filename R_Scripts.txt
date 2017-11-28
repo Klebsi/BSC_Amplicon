@@ -1,0 +1,625 @@
+# Script 1 - TaxAnno.R
+library(tidyr)
+# All sequences and size
+Allseqs <- read.delim("seq_size.txt", header=F)
+Allseqs <- separate(Allseqs, "V1", c("ID", "Size"), ";size=")
+Allseqs$Size <- lapply(Allseqs$Size, function(x) gsub(";", "", x))
+Allseqs$ID <- lapply(Allseqs$ID, function(x) gsub(">", "", x))
+Allseqs$ID <- unlist(Allseqs$ID)
+# Taxonomy assignment, singlet removal
+Alldf <- read.delim("blast_rep.out", header=F)
+Alldf <- separate(Alldf, "V1", c("V1", "Size"), ";size=")
+Alldf$Size <- as.numeric(Alldf$Size)
+Alldf <- Alldf[Alldf$Size > 2,]
+Alldf <- data.frame("SeqID"=Alldf$V1, "EV"=100, "AnnoID"=Alldf$V2)
+Taxonomy <- read.delim("SILVA_128_taxa.txt", header = F, sep= " ")
+Taxonomy$V1 <- lapply(Taxonomy$V1, function(x) gsub(">", "" ,x))
+colnames(Taxonomy) <- c("ID", "Taxa")
+Newdf <- merge(Alldf, Taxonomy, by.x="AnnoID", by.y="ID", all.x = T)
+Newdf <- Newdf[!duplicated(Newdf$SeqID),]
+Newdf <- merge(Allseqs, Newdf, by.x="ID", by.y="SeqID", all.x=T)
+Newdf <- Newdf[c(1,2,4,5,3)]
+Newdf[is.na(Newdf$EV),3] <- 0
+Newdf$Taxa <- as.character(Newdf$Taxa)
+Newdf[is.na(Newdf$Taxa),4] <- "N|o|_|h|i|t"
+Newdf$AnnoID <- as.character(Newdf$AnnoID)
+Newdf[is.na(Newdf$AnnoID),5] <- "No_hit"
+Newdf$Size <- unlist(Newdf$Size)
+write.table(Newdf, "representatives.results.txt", quote = F, row.names =F, col.names = F, sep="\t")
+----------------------------------------------
+# Script 2 - DownstreamAna.R
+#Load all necessary libraries
+library(plyr)
+library(vegan)
+library(tidyr)
+library(scales)
+library(metagenomeSeq)
+library(ggplot2)
+library(car)
+library(reshape2)
+library(VennDiagram)
+# Load and filter data based on the mock community
+OTU.df <- read.delim("OTU2.txt")
+lt <- 300
+OTU2.df <- OTU.df[OTU.df$chimera != "Y" & OTU.df$length > lt & OTU.df$total > 72,]
+OTU2.df <- OTU2.df[c(1:12, 23, 34, 45, 50:54, 13:22, 24:33, 35:44, 46:49)]
+for(c in 12:54){
+  OTU2.df[OTU2.df[c]<6, c] <- 0
+}
+# Rarefaction plot
+OTU.rar <- t(OTU2.df[paste0("S", 1:43)])
+data.rf <- rarecurve(OTU.rar, step = 1000, sample = 50000, col = "blue", cex = 0.6)
+meta.tab <- data.frame(Sample=c(paste0("S", 1:43)), Site=c(rep(c(rep("BG", 3), rep("ED", 3), rep("JC", 3), rep("NÅ", 3), rep("TD", 3), rep("JC", 3), rep("NÅ", 3)), 2), "MC"),
+                      Location=c(rep(c(rep("Arctic", 6), rep("Antarctica", 3), rep("Arctic", 6), rep("Antarctica", 3), rep("Arctic", 3)), 2), "Synthetic"),
+                      Type=c(rep(c(rep("DNA", 15), rep("RNA", 6)), 2), "DNA"))
+SamInf <- meta.tab[c(2,4)]
+SamInf$Aff <- c(rep("P", 21), rep("E", 22))
+SamInf$Rep <- c(rep(1:3, 14), 1)
+SamInf$Complete <- paste(SamInf$Site, SamInf$Type, SamInf$Aff, SamInf$Rep)
+RarData <- data.frame()
+for(r in 1:43){
+  RarVal <- as.data.frame(data.rf[[r]])
+  RarVal$SampleSize <- row.names(RarVal)
+  RarVal$SampleSize <- lapply(RarVal$SampleSize, gsub, pattern='N', replacement='')
+  RarVal$SampleSize <- as.numeric(RarVal$SampleSize)
+  RarVal$Sample <- SamInf[r,4]
+  colnames(RarVal) <- c("OTUs", "SampleSize", "Sample")
+  RarData <- rbind(RarData, RarVal)
+}
+rar.col <- c(rep("#fed976", 6),rep("#c2a5cf", 6), rep("#5aae61", 6), rep("#1b7837", 6), "gray60",
+             rep("#92c5de", 6),rep("#4393c3", 6), rep("#8c510a", 6))
+ggplot(RarData, aes(x=SampleSize, y=OTUs, col=Sample, linetype=Sample)) +
+  geom_line(size=0.8) +
+  scale_x_continuous(labels=comma) +
+  scale_y_continuous(labels=comma) +
+  scale_color_manual(values=rar.col) +
+  scale_linetype_manual(values = c(rep(c(rep("dashed", 3), rep("solid", 3)), 4),
+                                   rep(c(rep("dashed", 3), rep("solid", 3)), 3))) +
+  labs(x= "Number of sampled sequences", y="Number of observed OTUs") +
+  theme_bw() +
+  theme(plot.title = element_text(face="bold"),
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill="white", colour = "black", size = 1),
+        axis.line = element_blank(),
+        axis.title = element_text(size= 19, face = "bold"),
+        axis.text = element_text(size=14, face = "bold", colour = "black"))
+# Normalization
+OTU.pn <- OTU2.df[c(10,12:54)]
+OTU.pn <- ddply(OTU.pn, .(taxonomy), colwise(sum))
+tax.df <- OTU.pn[c(1)]
+count.df <- OTU.pn[paste0("S", 1:42)]
+meta.df <- data.frame(Sample=c(paste0("S", 1:43)), Site=c(rep(c(rep("BG7", 3), rep("EiE", 3), rep("Gr1", 3), rep("NÅ", 3), rep("TO", 3), rep("Gr1", 3), rep("NÅ", 3)), 2), "MC"),
+                      Location=c(rep(c(rep("Arctic", 6), rep("Antarctica", 3), rep("Arctic", 6), rep("Antarctica", 3), rep("Arctic", 3)), 2), "Synthetic"),
+                      Type=c(rep(c(rep("DNA", 15), rep("RNA", 6)), 2), "DNA"))
+row.names(meta.df) <- meta.df$Sample
+meta.df <- meta.df[-1]
+phenotypeData <- AnnotatedDataFrame(meta.df)
+OTUdata <- AnnotatedDataFrame(tax.df)
+OTU.css <- newMRexperiment(count.df,phenoData=phenotypeData,featureData=OTUdata)
+p <- cumNormStatFast(OTU.css)
+OTU2.css <- cumNorm(OTU.css, p = p)
+OTU.nor <- MRcounts(OTU2.css, norm = T, log = T)
+OTU.nor <- as.data.frame(OTU.nor)
+OTU.nor <- merge(tax.df, OTU.nor, by=0, all=T)
+OTU.nor <- OTU.nor[order(OTU.nor$taxonomy), -1]
+# Replicate clustering heat map and PCA
+Tax.agg <-  aggTax(OTU2.css, lvl = "taxonomy", out = "matrix")
+rep.rem <- c(37, 43)
+Tax2.agg <- Tax.agg[,-rep.rem]
+meta.agg <- meta.df[-rep.rem,]
+phenotypeData <- AnnotatedDataFrame(meta.agg)
+Tax.mr <- newMRexperiment(Tax2.agg,phenoData=phenotypeData)
+sam.col <- c(rep(c(rep("#fed976", 3), rep("#c2a5cf", 3), rep("#5aae61", 3),rep("#92c5de", 3),
+             rep("#8c510a", 3), rep("#1b7837", 3), rep("#4393c3", 3)), 2), "gray60")
+sam.col <- sam.col[-rep.rem]
+heat.col = colorRampPalette(c("lightsteelblue3", "lightyellow1", "thistle2"))(8)
+plotMRheatmap(obj = Tax.mr, n = 1000, cexRow = 0.4, cexCol = 1 ,trace = "none", col = heat.col, ColSideColors = sam.col)
+PCA.data <- t(Tax.agg)
+row.names(PCA.data) <- 1:43
+rowsel <- list(seq(1, 21), c(22:36, 38:42))
+rowsel2 <- list(seq(1, 21), c(1:15, 17:21))
+for(t in 1:2){
+  OTU.mds <- metaMDS(PCA.data[rowsel[[t]],], trace = FALSE)
+  OTU.bray <- as.data.frame(OTU.mds["points"])
+  samvec <- c(rep("BG7", 3), rep("EiE", 3), rep("Gr1", 3), rep("NÅ", 3), rep("TO", 3), rep("Gr1", 3), rep("NÅ", 3))
+  typvec <- c(rep("DNA", 15), rep("RNA", 6))
+  OTU.bray$Sample <- samvec[rowsel2[[t]]]
+  OTU.bray$Type <- typvec[rowsel2[[t]]]
+  OTU.bray$Sample <- paste(OTU.bray$Sample, OTU.bray$Type, sep="_")
+  pca.col <- c("#fed976", "#c2a5cf", "#5aae61", "#1b7837", "#92c5de", "#4393c3", "#8c510a")
+  pca.col <- pca.col[rowsel2[[t]]]
+  ggplot(OTU.bray, aes(x=points.MDS1, y=points.MDS2, col=Sample, fill=Sample)) +
+    geom_point(alpha=0.8, size=8, shape=21) +
+    scale_color_manual(values=pca.col) +
+    scale_fill_manual(values=pca.col) +
+    labs(x="MDS 1", y="MDS 2") +
+    theme_bw() +
+    theme(plot.title = element_text(face="bold"),
+          panel.grid = element_blank(),
+          panel.background = element_rect(fill="white", colour = "black", size = 1),
+          axis.line = element_blank(),
+          axis.title = element_text(size= 19, face = "bold"),
+          axis.text = element_text(size=14, face = "bold", colour = "black"))
+}
+# Diversity calculation
+Shannon <- diversity(PCA.data)
+Simpson <-  diversity(PCA.data, "simpson")
+InvSimpson <-  diversity(PCA.data, "inv")
+indvec <- list(1:3, 4:6, 7:9, 10:12, 13:14, 16:18, 19:21, 22:24, 25:27, 29:30, 31:33, 34:36, 38:39, 40:42)
+indmean <- c()
+for(i in 1:14){
+  indmean <- c(indmean, mean(Shannon[indvec[[i]]]), mean(Simpson[indvec[[i]]]), mean(InvSimpson[indvec[[i]]]))
+}
+index.df <- data.frame(Sample=paste(meta.df$Site, meta.df$Type, sep="_"), Shannon=Shannon,
+                       Simpson=Simpson, InvSimpson=InvSimpson)
+index.pro <- index.df[c(1:14, 16:21),]
+index.euk <- index.df[c(22:27, 29:36, 38:42),]
+index.list <- list(index.pro, index.euk)
+for(t in 1:2){
+  indices <- c("None","Shannon", "Simpson", "Inverse Simpson")
+  for(i in 2:4){
+    ggplot(index.list[[t]], aes(Sample, index.list[[t]][i], col=Sample, fill=Sample)) +
+      geom_boxplot(alpha=0.4, size=1) +
+      scale_color_manual(values=pca.col) +
+      scale_fill_manual(values=pca.col) +
+      labs(x="", y=paste0(indices[i]," index")) +
+      theme_bw() +
+      theme(plot.title = element_text(face="bold"),
+            panel.grid = element_blank(),
+            panel.background = element_rect(fill="white", colour = "black", size = 1),
+            axis.line = element_blank(),
+            axis.title = element_text(size= 19, face = "bold"),
+            axis.text = element_text(size=14, face = "bold", colour = "black"),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank())
+  }
+}
+stat.list <- c("Shan,Simp,Inv,euk,pro")
+for(t in 1:2){
+  if(t==1){
+    anova.df <- index.euk
+  }else{
+    anova.df <- index.pro
+  }
+  for(i in 2:4){
+    anova.df.m <- anova.df
+    colnames(anova.df.m)[i] <- "NOW" 
+    stat.list <- list(stat.list, leveneTest(anova.df.m$NOW, anova.df.m$Sample))
+    index.aov <- aov(NOW ~ Sample, data = anova.df.m)
+    stat.list <- list(stat.list, summary.lm(index.aov))
+    index.ph <- TukeyHSD(index.aov, "Sample", conf.level=0.95)
+    stat.list <- list(stat.list, index.ph)
+  }
+}
+# Bubble plots depicting relative taxonomic abundance
+tax.pl.df <- as.data.frame(Tax.agg)
+tax.pl.df$taxa <- row.names(tax.pl.df)
+colnames(tax.pl.df)[1:43] <- as.character(paste(meta.df$Site, meta.df$Type, sep="_"))
+tax.pl.df <- tax.pl.df[-c(15,28,37)]
+tax.pl.df <- separate(tax.pl.df, "taxa", paste0("T_Lvl_", 1:15), sep="\\|")
+for(c in 1:39){
+  tax.pl.df[c] <- tax.pl.df[c]/sum(tax.pl.df[c])*100
+}
+tax.pl.df[is.na(tax.pl.df)] <- ""
+bryovec <- c("Buckiella_undulata", "Encalypta_rhaptocarpa", "Heterophyllium_affine", "Parisia_laevipila", "Solenostoma_hyalinum") # Are all Bryophyta
+for(b in 1:length(bryovec)){
+  tax.pl.df[tax.pl.df$T_Lvl_8 == bryovec[b], "T_Lvl_8"] <- "Bryophyta"
+}
+marchvec <- c("Lepidozia_reptans", "Marchantia_polymorpha_(liverwort)", "Metzgeria_conjugata", "Scapania_nemorea") # Are all Marchantiophyta
+for(m in 1:length(marchvec)){
+  tax.pl.df[tax.pl.df$T_Lvl_8 == marchvec[m], "T_Lvl_8"] <- "Marchantiophyta"
+}
+embvec <- c("Bryophyta", "Marchantiophyta", "Tracheophyta")
+for(e in 1:3){
+  tax.pl.df[tax.pl.df$T_Lvl_8 == embvec[e], "T_Lvl_5"] <- embvec[e]
+}
+otuplot <- function(df, Lvl, group){
+  if(group == "Bacteria"){
+    locs <- c(1:20, 40:54)
+    poecol <- 20
+  } else {
+    locs <- c(21:54)
+    poecol <- 19
+  }
+  Lvl.1 <- poecol + Lvl
+  df <- df[locs]
+  df <- df[df[Lvl.1] == group,]
+  if(group == "Chloroplastida"){
+    Lvl.1 <- Lvl.1 + 1
+  }
+  df <- df[c(1:poecol, Lvl.1 + 1)]
+  colnames(df)[poecol +1] <- "Taxa"
+  df[df$Taxa == "uncultured_Eimeriidae", "Taxa"] <- "SAR"
+  df <- ddply(df, .(Taxa), colwise(sum))
+  df <- melt(df, id=c("Taxa"))
+  df$variable <- lapply(df$variable, gsub, pattern='\\.\\d', replacement='')
+  df$variable <- unlist(df$variable)
+  df <- df[df$value != 0,]
+  df.m <- ddply(df, .(variable, Taxa), colwise(mean))
+  df.sd <- ddply(df, .(variable, Taxa), colwise(sd))
+  if(group == "Chloroplastida"){
+    df.sd[df.m$value < 1, 2] <- "Other"
+    df.m[df.m$value < 1, 2] <- "Other" 
+    df.sd <- ddply(df.sd, .(variable, Taxa), colwise(mean))
+    df.m <- ddply(df.m, .(variable, Taxa), colwise(sum))
+  }
+  df.sd$value <- df.sd$value + df.m$value
+  colnames(df.sd) <- c("1", "2", "SD")
+  df.bub <- cbind(df.m, df.sd$SD)
+  colnames(df.bub) <- c("Sample", "Taxa", "Mean", "SD")
+  if(group != "Chloroplastida"){
+    df.bub$Taxa <- factor(df.bub$Taxa, levels=rev(unique(df.bub[order(df.bub$Taxa),"Taxa"])))
+  } else {
+    df.bub$Taxa <- factor(df.bub$Taxa, levels=c("Other", "Trebouxiophyceae", "Tracheophyta", "Marchantiophyta", "Chlorophyceae", "Bryophyta"))
+  }
+  ggplot() +
+    geom_point(data=df.bub, aes(x=Sample, y=Taxa, size=Mean, col=Sample), shape=16, alpha=0.8) +
+    geom_point(data=df.bub, aes(x=Sample, y=Taxa, size=SD, col=Sample), shape=1, stroke=1, alpha=1) +
+    scale_color_manual(values=pca.col) +
+    scale_size(range=c(1, max(df.bub$Mean)/3)) +
+    labs(x="", y="") +
+    theme_bw() +
+    theme(plot.title = element_text(face="bold"),
+          panel.grid.major = element_line(colour="gray90"),
+          panel.grid.minor = element_line(colour="gray90"),
+          panel.background = element_rect(fill="white", colour = "black", size = 1),
+          axis.line = element_blank(),
+          axis.title = element_text(size= 19, face = "bold"),
+          axis.text = element_blank(),
+          #axis.text = element_text(size=14, face = "bold", colour = "black"),
+          #axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = "none")
+  return(df.bub)
+}
+plot.df <- otuplot(tax.pl.df, 1, "Bacteria")
+plot.df <- otuplot(tax.pl.df, 1, "Eukaryota")
+plot.df <- otuplot(tax.pl.df, 3, "Chloroplastida")
+plot.df <- otuplot(tax.pl.df, 2, "SAR")
+# Venn diagrams depicting presence/absence of algal and cyanobacterial OTUs
+OTU.comp.df <- tax.pl.df
+foc.group <- c("Cyanobacteria", "Klebsormidiophyceae", "Zygnematophyceae", "Trebouxiophyceae", "Chlorophyceae", "Chrysophyceae", "Diatomea", "Eustigmatophyceae", "Xanthophyceae")
+foc.lvl <- c(3, 5, 6, 5, 5, 5, 5, 5, 5)
+for(g in 1:length(foc.group)){
+  if(foc.group[g] == "Cyanobacteria"){
+    OTU.foc.df <- OTU.comp.df[c(1:20, 40:54)]
+    OTU.foc.df <- OTU.foc.df[OTU.foc.df[20 + foc.lvl[g]] == foc.group[g],]
+    OTU.foc.df <- OTU.foc.df[1:20]
+    OTU.foc.df$OTU <- paste0("OTU", 1:length(OTU.foc.df$BG7_DNA))
+    OTU.foc.df$Gr1D <- rowMeans(OTU.foc.df[7:9])
+    OTU.foc.df$NÅD <- rowMeans(OTU.foc.df[10:12])
+    OTU.foc.df$TOD <- rowMeans(OTU.foc.df[13:14])
+    OTU.foc.df$Gr1R <- rowMeans(OTU.foc.df[15:17])
+    OTU.foc.df$NÅR <- rowMeans(OTU.foc.df[18:20])
+  } else {
+    OTU.foc.df <- OTU.comp.df[c(21:54)]
+    OTU.foc.df <- OTU.foc.df[OTU.foc.df[19 + foc.lvl[g]] == foc.group[g],]
+    OTU.foc.df <- OTU.foc.df[1:19]
+    OTU.foc.df$OTU <- paste0("OTU", 1:length(OTU.foc.df[,1]))
+    OTU.foc.df$Gr1D <- rowMeans(OTU.foc.df[7:8])
+    OTU.foc.df$NÅD <- rowMeans(OTU.foc.df[9:11])
+    OTU.foc.df$TOD <- rowMeans(OTU.foc.df[12:14])
+    OTU.foc.df$Gr1R <- rowMeans(OTU.foc.df[15:16])
+    OTU.foc.df$NÅR <- rowMeans(OTU.foc.df[17:19])
+  }
+  OTU.foc.df$BG7D <- rowMeans(OTU.foc.df[1:3])
+  OTU.foc.df$EiED <- rowMeans(OTU.foc.df[4:6])
+  OTU.foc.df <- OTU.foc.df[(ncol(OTU.foc.df)-7):ncol(OTU.foc.df)]
+  for(c in 2:8){
+    OTU.foc.df[OTU.foc.df[c] > 0,c] <- OTU.foc.df[OTU.foc.df[c] > 0,1]
+  }
+  BG7D <- OTU.foc.df[OTU.foc.df$BG7D != 0,"BG7D"]
+  EiED <- OTU.foc.df[OTU.foc.df$EiED != 0,"EiED"]
+  Gr1D <- OTU.foc.df[OTU.foc.df$Gr1D != 0,"Gr1D"]
+  NÅD <- OTU.foc.df[OTU.foc.df$NÅD != 0,"NÅD"]
+  TOD <- OTU.foc.df[OTU.foc.df$TOD != 0,"TOD"]
+  Gr1R <- OTU.foc.df[OTU.foc.df$Gr1R != 0,"Gr1R"]
+  NÅR <- OTU.foc.df[OTU.foc.df$NÅR != 0,"NÅR"]
+  temp <- venn.diagram(list(BG=BG7D, ED=EiED, JC=Gr1D, NÅ=NÅD, TD=TOD), col=pca.col[c(1:3, 5, 7)],
+                       lwd = 2.5, margin=0.03, ext.text=F, filename=NULL)
+  for(c in 2:8){
+    OTU.foc.df[OTU.foc.df[c] != 0,c] <- 1
+  }
+}
+# Environmental vector fitting
+Env.data <- t(Tax.agg)
+ph.prop <- read.csv("EnvPara.csv")
+for(t in 1:2){
+  if(t == 1){
+    Env.mds <- metaMDS(Env.data[c(22:27, 31:36, 40:42),], trace = FALSE, distance = "jaccard", k=2,trymax=50)
+    Env.bray <- as.data.frame(Env.mds["points"])
+    Env.bray$Sample <- c(rep("BG7", 3), rep("EiE", 3), rep("NÅ", 3), rep("TO", 3), rep("NÅ", 3))
+    Env.bray$Type <- c(rep("DNA", 12), rep("RNA", 3))
+    Env.bray$Sample <- paste(Env.bray$Sample, Env.bray$Type, sep="_")
+    ph.prop.m <- rbind(ph.prop[13:24,], ph.prop[19:21,])
+    ph.prop.m$Sample <- as.character(ph.prop.m$Sample)
+    ph.prop.m[13:15, 1] <- paste0("S", 40:42)
+  } else {
+    Env.mds <- metaMDS(Env.data[c(1:6, 10:14, 19:21),], trace = FALSE, distance = "jaccard", k=2,trymax=50)
+    Env.bray <- as.data.frame(Env.mds["points"])
+    Env.bray$Sample <- c(rep("BG7", 3), rep("EiE", 3), rep("NÅ", 3), rep("TO", 2), rep("NÅ", 3))
+    Env.bray$Type <- c(rep("DNA", 11), rep("RNA", 3))
+    Env.bray$Sample <- paste(Env.bray$Sample, Env.bray$Type, sep="_")
+    ph.prop.m <- rbind(ph.prop[1:11,], ph.prop[7:9,])
+    ph.prop.m$Sample <- as.character(ph.prop.m$Sample)
+    ph.prop.m[12:14, 1] <- paste0("S", 19:21)
+  }
+  ef <- envfit(Env.mds, ph.prop.m, permu = 999)
+  ef.df <- as.data.frame(ef[[1]][1])
+  ef.df <- cbind(ef.df, data.frame(ef[[1]][2], p=ef[[1]]['pvals']))
+  ef.df <- ef.df[ef.df$pvals < 0.05,]
+  env.col <- c("#fed976", "#c2a5cf", "#92c5de", "#4393c3", "#8c510a")
+  plotthis <- ggplot() +
+    geom_point(data=Env.bray, aes(x=points.MDS1, y=points.MDS2, col=Sample, fill=Sample), alpha=0.8, size=8, shape=21) +
+    scale_color_manual(values=env.col) +
+    scale_fill_manual(values=env.col) +
+    labs(x="MDS 1", y="MDS 2") +
+    theme_bw() +
+    theme(plot.title = element_text(face="bold"),
+          panel.grid = element_blank(),
+          panel.background = element_rect(fill="white", colour = "black", size = 1),
+          axis.line = element_blank(),
+          axis.title = element_text(size= 19, face = "bold"),
+          axis.text = element_text(size=14, face = "bold", colour = "black"),
+          legend.position = "none")
+    gg.cmd <- 'plotthis'
+      for(r in 1:nrow(ef.df)){
+        seg.cmd <- paste0('geom_segment(aes(x = 0, y = 0, xend = ef.df[',r,',1], yend = ef.df[',r,',2]),
+                             color="black", arrow = arrow(length = unit(0.03, "npc")), size=1)')
+        gg.cmd <- paste(gg.cmd, seg.cmd, sep = " + ")
+      }
+    eval(parse(text=gg.cmd))
+}
+# Venn diagrams showing the OTUs shared between DNA and RNA
+Share.df <- as.data.frame(Tax.agg)
+Share.df <- Share.df[c(7:12, 16:21, 29:33, 38:42)]
+Share.df$Gr1_D <- rowMeans(Share.df[c(1:3, 13:14)])
+Share.df$Gr1_R <- rowMeans(Share.df[c(7:9, 18:19)])
+Share.df$NÅ_D <- rowMeans(Share.df[c(4:6, 15:17)])
+Share.df$NÅ_R <- rowMeans(Share.df[c(10:12, 20:22)])
+Share.df <- Share.df[-1552,23:26]
+Share.df$OTU <- paste0("OTU_", 1:nrow(Share.df))
+for(c in 1:4){
+  Share.df[Share.df[c] > 0,c] <- Share.df[Share.df[c] > 0,5]
+}
+Gr1D <- Share.df[Share.df$Gr1_D != 0,1]
+Gr1R <- Share.df[Share.df$Gr1_R != 0,2]
+NÅD <- Share.df[Share.df$NÅ_D != 0,3]
+NÅR <- Share.df[Share.df$NÅ_R != 0,4]
+temp <- venn.diagram(list(DNA=Gr1D, RNA=Gr1R), lwd = 2.5, margin=0.03, ext.text=F, filename=NULL)
+temp <- venn.diagram(list(DNA=NÅD, RNA=NÅR), lwd = 2.5, margin=0.03, ext.text=F, filename=NULL)
+# Differential abundances
+Tax.split <- as.data.frame(Tax.agg)
+Tax.split$Taxa <- rownames(Tax.split)
+Tax.split <- Tax.split[Tax.split$Taxa != "N|o|_|h|i|t",]
+Tax.split <- separate(Tax.split, "Taxa", paste0("Lvl", 1:10), sep="\\|")
+for(c in 3:10){
+  Tax.split[is.na(Tax.split[43 + c]),43 + c] <- Tax.split[is.na(Tax.split[43 + c]),42 + c]
+}
+DA.pl <- data.frame()
+for(s in 3:4){
+  for(l in 1:9){
+    Tax.split.m <- Tax.split[c(1:(44+l))]
+    Tax.split.m[44] <- do.call(paste, c(Tax.split[44:(44+l)], sep="|"))
+    colnames(Tax.split.m)[44] <- "Group"
+    Tax.split.m <- Tax.split.m[1:44]
+    Tax.split.m <- ddply(Tax.split.m, .(Group), colwise(sum))
+    rownames(Tax.split.m) <- Tax.split.m$Group
+    Tax.split.m <- Tax.split.m[-1]
+    Tax3.agg <- Tax.split.m[,da.list[[s]]]
+    meta3.agg <- meta.df[da.list[[s]],]
+    phenotypeData <- AnnotatedDataFrame(meta3.agg)
+    DA.mr <- newMRexperiment(Tax3.agg,phenoData=phenotypeData)
+    DA.mr <- cumNorm(DA.mr, p = 0.5)
+    DA.mr <- filterData(DA.mr, depth = 1)
+    mod <- model.matrix(~1 + Type, data = meta3.agg)
+    DA.df <- MRcoefs(fitFeatureModel(DA.mr, mod))
+    DA.df <- DA.df[DA.df$adjPvalues < 0.001,]
+    if(nrow(DA.df) > 0){
+      DA.pl <- rbind(DA.pl, data.frame(Taxa=row.names(DA.df), FC=DA.df$logFC, Sample=da.vec[s], Lvl=l))
+    }
+  }
+}
+DA.pl <- DA.pl[abs(DA.pl$FC) > 2,]
+DA.pl <- DA.pl[!is.na(DA.pl$Taxa),]
+DA.pl <- DA.pl[-grep("Chloroplast\\|", DA.pl$Taxa),]
+DA.hm <- DA.pl[DA.pl$Lvl < 8,-3]
+DA.hm <- dcast(DA.hm, Taxa ~ Lvl, value.var = "FC")
+DA.hm$Taxa <- as.character(DA.hm$Taxa)
+DA.hm <- DA.hm[order(DA.hm$Taxa),]
+for(l in 1:6){
+  for(r in 1:length(DA.hm$Taxa)){
+    if(grepl(DA.hm[r,1], DA.hm[r+1,1],fixed = T) == T){
+      DA.hm[r,1] <- DA.hm[r+1,1]
+    } else {}
+  }
+}
+DA.hm[is.na(DA.hm)] <- 0
+DA.hm <- ddply(DA.hm, .(Taxa), colwise(sum))
+DA.hm$Taxa <- factor(DA.hm$Taxa, levels=rev(DA.hm$Taxa))
+DA.hm <- melt(DA.hm, "Taxa")
+ggplot(DA.hm, aes(x=variable, y=Taxa)) +
+  geom_tile(aes(fill = value))+
+  scale_fill_gradient2(low = "#7b3294", mid="#ffffbf", high = "#008837", na.value = "#ffffbf") +
+  labs(x="", y="") +
+  theme(plot.title = element_text(face="bold"),
+        panel.grid = element_blank(),
+        axis.line = element_blank(),
+        axis.title = element_text(size= 19, face = "bold"),
+        axis.text = element_text(size=14, face = "bold", colour = "black"),
+        axis.ticks = element_blank())
+        #legend.position = "none")
+# Co-occurrence analysis (taken from Williams et al. 2014)
+pre.comm.data <- as.data.frame(Tax.agg)
+pre.comm.data$taxa <- rownames(pre.comm.data)
+pro.comm.data <- pre.comm.data[grep("Bacteria", pre.comm.data$taxa),c(44, 1:6, 8:14, 17:21)]
+colnames(pro.comm.data)[2:19] <- paste0("S", 1:18)
+pro.comm.data <- separate(pro.comm.data, "taxa", paste0("Lvl", 1:7), sep="\\|")
+pro.comm.data <- pro.comm.data[rowSums(pro.comm.data[, 8:25]) != 0,]
+write.csv(pro.comm.data, "Data_Fig8_pro.csv", quote=F,
+          row.names = F)
+# Modified manually
+pro.comm.data.m <- read.csv("Data_Fig8_pro.csv", header=T)
+pro.order <- pro.comm.data.m[c(1, 8:25)]
+euk.comm.data <- pre.comm.data[grep("Eukaryota", pre.comm.data$taxa), c(44, 22:27, 29:35, 38:42)]
+colnames(euk.comm.data)[2:19] <- paste0("S", 1:18)
+euk.comm.data <- separate(euk.comm.data, "taxa", paste0("Lvl", 1:10), sep="\\|")
+euk.comm.data <- euk.comm.data[rowSums(euk.comm.data[, 8:25]) != 0,]
+write.csv(euk.comm.data, "Data_Fig8_euk.csv", quote=F,
+          row.names = F)
+# Manually modified
+euk.comm.data.m <- read.csv("Data_Fig8_euk.csv", header=T)
+euk.class <- euk.comm.data.m[c(1, 11:28)]
+all.o.c <- rbind(pro.order, euk.class)
+all.o.c <- ddply(all.o.c, "Lvl1", colwise(sum))
+rownames(all.o.c) <- all.o.c$Lvl1
+all.o.c <- all.o.c[,-1]
+comm.data <- as.data.frame(t(all.o.c))
+comm.data$rep <- "BSC"
+trts<-as.vector((unique((comm.data$rep))))
+results<-matrix(nrow=0,ncol=7)
+options(warnings=-1)
+for(a in 1:length(trts)){
+  #pull the first element from the vector of treatments
+  trt.temp<-trts[a]
+  #subset the dataset for those treatments
+  temp<-subset(comm.data, rep==trt.temp)
+  #in this case the community data started at column 6, so the loop for co-occurrence has to start at that point
+  for(b in 1:(dim(temp)[2]-2)){
+    #every species will be compared to every other species, so there has to be another loop that iterates down the rest of the columns
+    for(c in (b+1):(dim(temp)[2]-1)){
+      #summing the abundances of species of the columns that will be compared
+      species1.ab<-sum(temp[,b])
+      species2.ab<-sum(temp[,c])
+      #if the column is all 0's no co-occurrence will be performed
+      if(species1.ab >1 & species2.ab >1){
+        test<-cor.test(temp[,b],temp[,c],method="spearman",na.action=na.rm)
+        rho<-test$estimate
+        p.value<-test$p.value
+      }
+      if(species1.ab <=1 | species2.ab <= 1){
+        rho<-0
+        p.value<-1
+      }
+      new.row<-c(trts[a],names(temp)[b],names(temp)[c],rho,p.value,species1.ab,species2.ab)
+      results<-rbind(results,new.row)			
+    }
+  }
+  print(a/length(trts))
+}
+co_occur_pairs<-function(dataset){
+  final.results<-data.frame()
+  rhos<-c(-.75,-.5,.5,.75)
+  trts<-as.vector(unique(dataset$trt))
+  #trts
+  for(t in 1:length(trts)){
+    #t<-1
+    dataset_trt<-subset(dataset, trt==trts[t])
+    dataset_trt_no0<-subset(dataset_trt, ab1 > 0 & ab2 > 0)
+    dataset_trt_no0$pairs<-paste(dataset_trt_no0$taxa1,dataset_trt_no0$taxa2)
+    for(r in 1:4){
+      #r<-5
+      if(rhos[r] < 0){temp<-subset(dataset_trt_no0, rho <= rhos[r])}
+      if(rhos[r] > 0){temp<-subset(dataset_trt_no0, rho >= rhos[r])}
+      if(dim(temp)[1]>1){
+        temp.graph<-simplify(graph.edgelist(as.matrix(temp[,c(2,3)]),directed=FALSE))
+        edge_list<-data.frame(get.edgelist(temp.graph,names=TRUE))
+        edge_list$pairs<-paste(edge_list$X1,edge_list$X2)
+        edge_list_pvals<-merge(edge_list,dataset_trt_no0,by="pairs",sort=FALSE  )
+        edge_list_pvals$rho_cut<-rhos[r]
+        edge_list_pvals$trt<-trts[t]
+        edge_list_pvals$qval<-fdrtool(edge_list_pvals$p.value, statistic="pvalue",plot=FALSE,verbose=FALSE)$qval
+        as.matrix(names(edge_list_pvals))
+        final.results<-rbind(final.results,edge_list_pvals[,-c(2:3)])	}
+    }
+    print(t/length(trts))
+  }
+  return(final.results)
+}
+results<-data.frame(data.matrix(results))
+names(results)<-c("trt","taxa1","taxa2","rho","p.value","ab1","ab2")
+results.m <- results
+results.m$rho <- as.numeric(as.character(results.m$rho))
+results.m$p.value <- as.numeric(as.character(results.m$p.value))
+results.m$ab1 <- as.numeric(as.character(results.m$ab1))
+results.m$ab2 <- as.numeric(as.character(results.m$ab2))
+edge_lists<-co_occur_pairs(results.m)
+graph1<-simplify(graph.edgelist(as.matrix(subset(edge_lists, rho_cut==0.75)[,3:4]),directed=FALSE))
+graph_int_high<-graph1
+E(graph_int_high)$color<-"gray50"
+E(graph_int_high)$width<-2.5
+tkplot(graph_int_high, vertex.color="white", vertex.label.color="black", vertex.label.family="Arial",
+       vertex.label.font=2, vertex.label.dist=1)
+# Functional prediction for prokaryotes
+OTUs.df <- read.delim("Crust1.table", header = T)
+OTUs.df <- OTUs.df[OTUs.df$chimera != "Y" & OTUs.df$length > 300 & OTUs.df$total > 72,]
+Crust.df <- OTUs.df[c(1:13, 24, 35, 46, 51:55, 14:23, 25:34, 36:45, 47:50)]
+Crust.df$amplicon <- as.character(Crust.df$amplicon)
+BLAST.df <- read.delim("Singlesremoved.out", header = F)
+BLAST.df$V1 <- gsub(";size=", "", BLAST.df$V1)
+BLAST.df <- BLAST.df[1:2]
+Crust.df <- merge(Crust.df, BLAST.df, by.x="amplicon", by.y = "V1", all.x = T)
+for(r in 5530:nrow(Crust.df)){
+  if(!identical(BLAST.df[grepl(Crust.df[r,1], BLAST.df$V1),2], integer(0))){
+    Crust.df[r,56] <- BLAST.df[grep(Crust.df[r,1], BLAST.df$V1),2]
+  }
+}
+OTU.pn <- Crust.df[c(56,13:55)]
+OTU.pn$Euk <- paste0("E", 1:nrow(OTU.pn))
+OTU.pn[is.na(OTU.pn$V2),1] <- OTU.pn[is.na(OTU.pn$V2),45]
+OTU.pn <- OTU.pn[-45]
+OTU.pn <- ddply(OTU.pn, .(V2), colwise(sum))
+tax.df <- OTU.pn[c(1)]
+count.df <- OTU.pn[paste0("S", 1:42)]
+meta.df <- data.frame(Sample=c(paste0("S", 1:42)), Site=c(rep(c(rep("BG7", 3), rep("EiE", 3), rep("Gr1", 3), rep("NÅ", 3), rep("TO", 3), rep("Gr1", 3), rep("NÅ", 3)), 2)),
+                      Location=c(rep(c(rep("Arctic", 6), rep("Antarctica", 3), rep("Arctic", 6), rep("Antarctica", 3), rep("Arctic", 3)), 2)),
+                      Type=c(rep(c(rep("DNA", 15), rep("RNA", 6)), 2)))
+row.names(meta.df) <- meta.df$Sample
+meta.df <- meta.df[-1]
+phenotypeData <- AnnotatedDataFrame(meta.df)
+OTUdata <- AnnotatedDataFrame(tax.df)
+OTU.css <- newMRexperiment(count.df,phenoData=phenotypeData,featureData=OTUdata)
+p <- cumNormStatFast(OTU.css)
+OTU2.css <- cumNorm(OTU.css, p = p)
+OTU.nor <- MRcounts(OTU2.css, norm = T, log = T)
+OTU.nor <- as.data.frame(OTU.nor)
+OTU.nor <- merge(tax.df, OTU.nor, by=0, all=T)
+OTU.nor <- OTU.nor[order(OTU.nor$V2), c(2:16, 18:23)]
+Pie.df <- OTU.nor[-grep("E", OTU.nor$V2),]
+colnames(Pie.df)[1] <- "OTU ID"
+PIC.IDs <- read.delim("16S_13_5_precalculated.tab") # Downloaded from picrust repository at github
+Pie.df <- merge(Pie.df, PIC.IDs, by.x="OTU ID", by.y="X.OTU_IDs")
+write.table(Pie.df[1:21], "Crust2.txt", quote=F, row.names = F, sep="\t")
+# Feed into Bash_Script FuncPred.sh (6)
+KEGG2 <- read.delim("kegg_functions.L2.txt")
+KEGG.hm <- KEGG2
+remvec <- c("Human Diseases", "Organismal Systems", "Unclassified")
+for(c in 1:3){
+  KEGG.hm <- KEGG.hm[-grep(remvec[c], KEGG.hm$KEGG_Pathways),]
+}
+KEGG.hm <- KEGG.hm[-1]
+KEGG.hm$BG <- rowMeans(KEGG.hm[1:3])
+KEGG.hm$ED <- rowMeans(KEGG.hm[4:6])
+KEGG.hm$JCD <- rowMeans(KEGG.hm[7:9])
+KEGG.hm$JCR <- rowMeans(KEGG.hm[15:17])
+KEGG.hm$NÅD <- rowMeans(KEGG.hm[10:12])
+KEGG.hm$NÅR <- rowMeans(KEGG.hm[18:20])
+KEGG.hm$TD <- rowMeans(KEGG.hm[13:14])
+KEGG.hm <- KEGG.hm[21:28]
+KEGG.hm$KEGG_Pathways <- factor(KEGG.hm$KEGG_Pathways,
+                                levels=rev(KEGG.hm[order(KEGG.hm$KEGG_Pathways),1]))
+KEGG.hm <- melt(KEGG.hm, .(KEGG_Pathways))
+ggplot(KEGG.hm, aes(x=KEGG_Pathways, y=value, fill=variable)) +
+  geom_bar(stat = "identity", position = "dodge", width=0.7) +
+  scale_fill_manual(values = pca.col) +
+  labs(x="", y="Abundance [P.d.u.]") +
+  coord_flip() +
+  theme(plot.title = element_text(face="bold"),
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill="white", colour = "black", size = 1),
+        axis.line = element_blank(),
+        axis.title = element_text(size= 19, face = "bold"),
+        axis.text = element_text(size=14, face = "bold", colour = "black"),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.ticks = element_blank(),
+        legend.position = "none")
